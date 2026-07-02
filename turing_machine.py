@@ -1,10 +1,10 @@
 from collections import defaultdict
 
 class TuringMachine:
-    def __init__(self, states, num_symbols, blank_index, transition, start, accept, reject): #i want transition as hashmap by the current state and symbol as keys
+    def __init__(self, states, alphabet_length, blank_index, transition, start, accept, reject): #i want transition as hashmap by the current state and symbol as keys
         self.states = states  # i will flatten a 2d array and represent the whole thing as an array. given the key pair (i,c), the correct index in an array
                               # will be i * k + l where K is the size of the alphabet and l is the index of c in the alphabet
-        self.alphabet = [x for x in range(0, num_symbols)]
+        self.alphabet = [x for x in range(0, alphabet_length)]
         self.blank_index = blank_index
         self.transition = transition
         self.start = start
