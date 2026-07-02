@@ -38,23 +38,28 @@ class TuringMachine:
     def reset(self, input_string: str):
         program_dict = defaultdict(lambda: self.blank)
         for pos, c in enumerate(input_string):
+            if (c not in self.alphabet):
+                raise ValueError(f"character {c} at position {pos} is not in alphabet")
             program_dict[pos] = c
 
         self.tape = program_dict
         self.head_pos = 0
         self.current_state = self.start
         self.char_to_int = {char: index for index, char in enumerate(self.alphabet)}
+
             
 
 class UniversalTuringMachine:
     pass
 
 def main():
-    # t = TuringMachine(None, None, None, None, None, None, None)
-    # s = "0100101010"
-    # t.load_program_as_string(s)
-    # print(t.get_tape_as_string())
-    pass
+    t = TuringMachine()
+
+    #program to accept anything non empty: (0,1,2), ('0','1','_'), '_', ((1, '1', 1), (1, '0', 1), (2, '_', 1), (2, '_', 1), (2, '_', 1), (2, '_', 1), (2, '_', 1), (2, '_', 1), (2, '_', 1)), 0, 1, 2
+    #program to accept string of even length: (0,1,2,3), ('0','1','_'), '_', ((1,'0',1),(1,'1',1), (3, '_', 1), (0,'0',1), (0,'1',1), (2, '_',1),(2, '_', 1),(2, '_', 1),(2, '_', 1),(2, '_', 1),(2, '_', 1),(2, '_', 1)), 1, 2, 3
+    t.reset("_")
+    print(t.run(10))
+
 
 if __name__ == "__main__":
     main()
