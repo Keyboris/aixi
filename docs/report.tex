@@ -1,0 +1,260 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{mathtools}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+
+% -- Code listing style for Python snippets --
+\definecolor{codegray}{gray}{0.95}
+\definecolor{codegreen}{rgb}{0.0,0.5,0.0}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codegray},
+  keywordstyle=\color{blue},
+  commentstyle=\color{codegreen},
+  stringstyle=\color{codepurple},
+  numbers=left,
+  numberstyle=\tiny,
+  breaklines=true,
+  frame=single,
+  language=Python,
+  showstringspaces=false,
+}
+
+\title{Implementing an AIXItl Agent in a Toy Environment:\\ A Technical Report}
+\author{Illia Yaretskyi}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report documents the design and implementation of an AIXItl agent -- a
+computable approximation of Hutter's universal artificial intelligence agent AIXI --
+together with the machinery required to build it: Turing and universal Turing machines,
+a bounded Kolmogorov complexity calculator, a Solomonoff universal predictor, and an
+expectimax planner operating over a toy environment. The work is organised as a sequence
+of self-contained stages, each of which is described in its own section.
+\end{abstract}
+
+\section{Introduction and Motivation}
+\label{sec:introduction}
+
+AIXI is a universal artificial intelligence agent proposed by Marcus Hutter. At its core,
+it extends Solomonoff's theory of universal induction -- which provides an optimal method
+for predicting the next output of any unknown computable process -- to the case of an
+active agent that takes actions and receives rewards. Classical reinforcement learning
+algorithms rely on structural assumptions about the environment, such as the Markov
+property, stationarity, or a known state space. AIXI requires none of these. It instead
+maintains a Bayesian mixture over all computable environments, weighted by their
+Kolmogorov complexity, and selects actions by planning with an expectimax tree over that
+mixture. It is therefore both parameter-free and assumption-free: no domain-specific
+tuning is required.
+
+The corresponding drawback is that AIXI is uncomputable. Evaluating the universal mixture
+requires simulating infinitely many programs, including non-halting ones, which is
+equivalent to solving the halting problem. To circumvent this, I implement \textbf{AIXItl},
+a tractable approximation that restricts the hypothesis space to programs of length at
+most $l$, each simulated for at most $t$ steps. This preserves the theoretical guarantees
+of AIXI for any environment whose generating program fits within these bounds, while
+remaining implementable on ordinary hardware. Alternative routes to tractability
+exist -- most notably MC-AIXI, which employs Monte Carlo sampling within the Solomonoff
+predictor -- but these are beyond the scope of this project.
+
+\section{Turing Machines and the Universal Turing Machine}
+\label{sec:turing}
+
+\subsection{Turing Machines}
+\label{sec:tm}
+
+A Turing machine is a fundamental model of computation. It is Turing-complete --
+capable of expressing any algorithm that can be expressed at all -- which makes it the
+natural substrate for the induction process described in later sections.
+
+Formally, a Turing machine is defined by a 7-tuple
+\[
+  (Q,\ \Sigma,\ \Gamma,\ \delta,\ q_{\text{start}},\ q_{\text{accept}},\ q_{\text{reject}}),
+\]
+where $Q$ is the finite set of states; $\Sigma$ is the input alphabet; $\Gamma$ is the
+tape alphabet ($\Sigma \subseteq \Gamma$), which includes a designated blank symbol;
+$\delta$ is the transition function
+\[
+  \delta : Q \times \Gamma \to Q \times \Gamma \times \{L, R\},
+\]
+mapping a (state, tape symbol) pair to a new state, a symbol to write, and a direction to
+move the head; and $q_{\text{start}}, q_{\text{accept}}, q_{\text{reject}} \in Q$ are the
+start, accept, and reject states respectively.
+
+The machine reads one symbol at a time from an infinite tape, updates its state and the
+current tape cell according to $\delta$, moves the head left or right, and halts when it
+reaches $q_{\text{accept}}$ or $q_{\text{reject}}$. Computation is deterministic: each
+(state, symbol) pair has at most one applicable rule.
+
+\subsection{The Universal Turing Machine}
+\label{sec:utm}
+
+A Universal Turing Machine (UTM) is a Turing machine capable of simulating any other
+Turing machine. It takes as input a binary encoding of some machine $M$ together with an
+input string $w$, and produces the same output that $M$ would produce on $w$. Crucially,
+$M$ does not run as a separate process -- it exists entirely as data on the UTM's tape.
+The UTM reads $M$'s transition table one rule at a time, determines the applicable
+transition for the current simulated state and symbol, and applies it, updating a region
+of its own tape that represents $M$'s tape.
+
+For a UTM to simulate an arbitrary machine $M$, it must be possible to express $M$ as a
+finite binary string. The convention for doing so is called an \emph{encoding scheme}. The
+choice of encoding scheme is a design decision: any scheme that is unambiguous and
+complete is valid, since the Invariance Theorem\textsuperscript{*} guarantees that
+Kolmogorov complexity changes by at most an additive constant between any two reasonable
+schemes.
+
+\par\noindent{\footnotesize\textsuperscript{*}The Invariance Theorem is discussed in
+Section~\ref{sec:kolmogorov} on Kolmogorov complexity.}
+
+\subsection{Encoding Scheme}
+\label{sec:encoding}
+
+The encoding scheme used in this project represents a Turing machine as a self-delimiting
+binary string structured as follows.
+
+\paragraph{Header.} The string opens with two unary fields. The number of states $n$ is
+encoded as $n$ ones followed by a zero; the size of the tape alphabet $k$ is encoded the
+same way. For example, four states and three symbols give the prefix
+\texttt{1111\,0\,111\,0}. These fields are self-delimiting -- a decoder reads ones until
+it sees a zero, requiring no external length information.
+
+\paragraph{Field widths.} Once $n$ and $k$ are known, all subsequent binary fields have
+fixed, computable widths:
+\begin{align*}
+  \texttt{state\_bits}  &= \lceil \log_2 n \rceil && \text{(minimum bits to index any state)},\\
+  \texttt{symbol\_bits} &= \lceil \log_2 k \rceil && \text{(minimum bits to index any tape symbol)}.
+\end{align*}
+
+\paragraph{Special states.} The indices of $q_{\text{start}}$, $q_{\text{accept}}$, and
+$q_{\text{reject}}$ follow immediately, each encoded in \texttt{state\_bits} bits. No
+delimiters are needed because the width is known exactly.
+
+\paragraph{Transition table.} The transition function $\delta$ is stored as a flat table
+of $n \times k$ entries in lexicographic order of (current state, current symbol) pairs.
+The input pair is implicit from the entry's position; only the output is stored. Each
+entry consists of three fields:
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  Field & Width \\
+  \midrule
+  \texttt{new\_state}  & \texttt{state\_bits} bits \\
+  \texttt{new\_symbol} & \texttt{symbol\_bits} bits \\
+  \texttt{direction}   & 1 bit ($0 = $ Left, $1 = $ Right) \\
+  \bottomrule
+\end{tabular}
+\end{center}
+Again, no delimiters are required. A decoder reads exactly
+$(\texttt{state\_bits} + \texttt{symbol\_bits} + 1)$ bits per entry and reconstructs each
+transition rule from the entry's position in the table.
+
+\paragraph{Blank symbol.} Finally, the index of the blank symbol is appended in
+\texttt{symbol\_bits} bits.
+
+The resulting string is fully self-delimiting: a decoder parses the unary header to
+determine all field widths, then reads a fixed number of bits at a time for every
+subsequent field. No delimiters appear anywhere in the binary portion of the encoding.
+This scheme was chosen for its compactness relative to a full unary encoding while
+remaining simple to implement and verify.
+
+\subsection{Worked Example}
+\label{sec:encoding-example}
+
+Consider the following Turing machine, which accepts any binary string of even length and
+rejects any string of odd length:
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  States    & $Q = \{0, 1, 2, 3\}$ \\
+  Alphabet  & $k = 3$ symbols (indices $0, 1, 2$ -- where $2$ is blank) \\
+  Blank     & index $2$ \\
+  Start     & state $1$ \\
+  Accept    & state $2$ \\
+  Reject    & state $3$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+The machine works by alternating between two non-halting states ($0$ and $1$) on each
+input symbol, effectively counting parity. On reading a blank (end of input), state $1$
+accepts and state $0$ rejects.
+
+\paragraph{Computing field widths.}
+\begin{align*}
+  \texttt{state\_bits}  &= \lceil \log_2 4 \rceil = 2,\\
+  \texttt{symbol\_bits} &= \lceil \log_2 3 \rceil = 2.
+\end{align*}
+
+\paragraph{Header.}
+\begin{center}
+\begin{tabular}{ll}
+  States (4)   & \texttt{1111 0} \\
+  Symbols (3)  & \texttt{111 0} \\
+\end{tabular}
+\end{center}
+
+\paragraph{Special states.}
+\begin{center}
+\begin{tabular}{ll}
+  \texttt{start = 1}  & \texttt{01} \\
+  \texttt{accept = 2} & \texttt{10} \\
+  \texttt{reject = 3} & \texttt{11} \\
+\end{tabular}
+\end{center}
+
+\paragraph{Transition table} (12 entries, one per (state, symbol) pair in order):
+\begin{center}
+\begin{tabular}{lll}
+  \toprule
+  Input pair & Output $(s', \sigma', d)$ & Encoding \\
+  \midrule
+  (state 0, symbol 0) & $(1, 0, R)$ & \texttt{01 00 1} \\
+  (state 0, symbol 1) & $(1, 1, R)$ & \texttt{01 01 1} \\
+  (state 0, symbol 2) & $(3, 2, R)$ & \texttt{11 10 1} \\
+  (state 1, symbol 0) & $(0, 0, R)$ & \texttt{00 00 1} \\
+  (state 1, symbol 1) & $(0, 1, R)$ & \texttt{00 01 1} \\
+  (state 1, symbol 2) & $(2, 2, R)$ & \texttt{10 10 1} \\
+  (states 2, 3)       & \multicolumn{2}{l}{unreachable from non-halting computation;} \\
+                      & \multicolumn{2}{l}{filled with $(2, 2, R)$ as a safe default: \texttt{10 10 1}} \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Blank index.}
+\begin{center}
+\begin{tabular}{ll}
+  \texttt{blank = 2} & \texttt{10} \\
+\end{tabular}
+\end{center}
+
+\paragraph{Concatenated encoding.}
+\begin{verbatim}
+11110 1110 01 10 11
+01001 01011 11101 00001 00011 10101 10101 10101 10101 10101 10101 10101
+10
+\end{verbatim}
+
+Removing spaces gives the final binary string:
+\begin{verbatim}
+11110111001101101001010111110100001000111010110101101011010110101101011010110
+\end{verbatim}
+
+This 77-bit string fully specifies the machine. A decoder reads the unary header to
+recover $n = 4$ and $k = 3$, computes $\texttt{state\_bits} = 2$ and
+$\texttt{symbol\_bits} = 2$, then reads 2 bits for each special state and 5 bits for each
+of the 12 transition entries, reconstructing the original 7-tuple exactly.
+
+\end{document}
