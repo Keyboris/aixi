@@ -30,7 +30,7 @@
 }
 
 \title{Implementing an AIXItl Agent in a Toy Environment:\\ A Technical Report}
-\author{Illia Yaretskyi}
+\author{Ivan Yaretskyi}
 \date{\today}
 
 \begin{document}
@@ -40,9 +40,11 @@
 This report documents the design and implementation of an AIXItl agent -- a
 computable approximation of Hutter's universal artificial intelligence agent AIXI --
 together with the machinery required to build it: Turing and universal Turing machines,
-a bounded Kolmogorov complexity calculator, a Solomonoff universal predictor, and an
+a bounded Kolmogorov complexity calculator, a Solomonoff universal predictor with a
+stratified Monte Carlo sampler over its hypothesis space, and (in future work) an
 expectimax planner operating over a toy environment. The work is organised as a sequence
-of self-contained stages, each of which is described in its own section.
+of self-contained stages, each described in its own section, together with a retrospective
+on the development process itself.
 \end{abstract}
 
 \section{Introduction and Motivation}
@@ -67,7 +69,8 @@ most $l$, each simulated for at most $t$ steps. This preserves the theoretical g
 of AIXI for any environment whose generating program fits within these bounds, while
 remaining implementable on ordinary hardware. Alternative routes to tractability
 exist -- most notably MC-AIXI, which employs Monte Carlo sampling within the Solomonoff
-predictor -- but these are beyond the scope of this project.
+predictor -- and, as later sections show, the practical demands of running this project on
+consumer hardware pushed the implementation in a similar direction independently.
 
 \section{Turing Machines and the Universal Turing Machine}
 \label{sec:turing}
@@ -79,45 +82,121 @@ A Turing machine is a fundamental model of computation. It is Turing-complete --
 capable of expressing any algorithm that can be expressed at all -- which makes it the
 natural substrate for the induction process described in later sections.
 
-Formally, a Turing machine is defined by a 7-tuple
+The implementation in this project uses a 6-tuple definition,
 \[
-  (Q,\ \Sigma,\ \Gamma,\ \delta,\ q_{\text{start}},\ q_{\text{accept}},\ q_{\text{reject}}),
+  (Q,\ \Gamma,\ \delta,\ q_{\text{start}},\ q_{\text{halt}},\ b),
 \]
-where $Q$ is the finite set of states; $\Sigma$ is the input alphabet; $\Gamma$ is the
-tape alphabet ($\Sigma \subseteq \Gamma$), which includes a designated blank symbol;
-$\delta$ is the transition function
+where $Q$ is the finite set of states; $\Gamma$ is the tape alphabet, with a designated
+blank symbol at index $b$; $\delta$ is the transition function
 \[
-  \delta : Q \times \Gamma \to Q \times \Gamma \times \{L, R\},
+  \delta : Q \times \Gamma \to Q \times \Gamma \times \{L, R\} \times \{0,1\},
 \]
-mapping a (state, tape symbol) pair to a new state, a symbol to write, and a direction to
-move the head; and $q_{\text{start}}, q_{\text{accept}}, q_{\text{reject}} \in Q$ are the
-start, accept, and reject states respectively.
+mapping a (state, tape symbol) pair to a new state, a symbol to write, a direction to move
+the head, and an \emph{emit} flag discussed in Section~\ref{sec:emission}; and
+$q_{\text{start}}, q_{\text{halt}} \in Q$ are the start and halt states. Computation is
+deterministic and stops the moment the machine transitions into $q_{\text{halt}}$.
 
-The machine reads one symbol at a time from an infinite tape, updates its state and the
-current tape cell according to $\delta$, moves the head left or right, and halts when it
-reaches $q_{\text{accept}}$ or $q_{\text{reject}}$. Computation is deterministic: each
-(state, symbol) pair has at most one applicable rule.
+This departs from the standard 7-tuple definition
+$(Q, \Sigma, \Gamma, \delta, q_{\text{start}}, q_{\text{accept}}, q_{\text{reject}})$ found
+in the theory-of-computation literature, which distinguishes an accepting halt state from a
+rejecting one. Section~\ref{sec:halt-merge} explains why this distinction was dropped, and
+in what precise sense the two models remain equivalent for the purposes of this project.
+
+\subsection{Why a Single Halt State}
+\label{sec:halt-merge}
+
+The standard 7-tuple model requires $q_{\text{accept}} \neq q_{\text{reject}}$, since the
+two states carry distinct meaning. Requiring two distinct halting states has a specific,
+damaging consequence for a machine with only $n=2$ states: \emph{both} available states
+must be halting states, leaving no state a transition can lead to other than immediate
+termination. A 2-state machine under the 7-tuple model therefore always halts after reading
+a single symbol, with no capacity to loop, branch on more than one symbol, or compute
+anything beyond a single-step response.
+
+This matters because 2-state machines are also the cheapest to describe: their encoded
+length is the shortest of any class (Section~\ref{sec:sampling} shows this class alone
+accounts for over half of all prior probability mass once the emit-bit scheme of
+Section~\ref{sec:emission} is in place). Under the 7-tuple model, the entire class
+contributing the most prior mass is guaranteed to be computationally inert -- a large
+fraction of the hypothesis space that the Solomonoff prior favours most heavily is, by
+construction, incapable of representing anything interesting.
+
+Collapsing $q_{\text{accept}}$ and $q_{\text{reject}}$ into one $q_{\text{halt}}$ frees up
+one of the two states in the $n=2$ case: one state can now serve purely as a working state,
+able to transition to itself and process more than one input symbol before halting.
+Structurally, a single halt state is a strict special case of the general model, not a
+different one: any 6-tuple machine embeds into a standard 7-tuple machine by declaring
+$q_{\text{halt}}$ the accept state and adding one additional, permanently unreachable
+reject state. The embedding is not reversible -- the 6-tuple model has no way to represent
+an \emph{explicit} rejection as distinct from an unbounded computation -- but this
+asymmetry costs nothing here. The predictor described in Section~\ref{sec:predictor} never
+queries whether a candidate program accepted or rejected; it only cares about the sequence
+of bits a program emits while running. Collapsing accept and reject into one halt state
+therefore loses no information the rest of the system uses, while directly repairing the
+most damaging structural defect in the smallest, most heavily weighted machine class.
+
+\subsection{Emitting Output}
+\label{sec:emission}
+
+An earlier version of this project treated the machine's tape, read left to right after
+halting (or after the step budget was exhausted), as its output. Two problems followed
+from this choice.
+
+First, a two-way infinite tape allows the head to move left of its starting position.
+Measurement on a large batch of randomly generated machines showed that roughly one in
+fifty programs, when compared at two different step budgets, did not have their shorter-run
+output as a prefix of their longer-run output: intervening leftward head movement had
+overwritten a cell that had already been read as part of the "output" at the earlier
+checkpoint. This silently violates the property the predictor depends on most -- that a
+program's prediction of bit $n$, once made, does not later change.
+
+Second, and more fundamentally, restricting attention to \emph{halted} programs discards
+every machine still computing when the step budget is reached. Measurement showed that
+halting machines average only one to two bits of usable output before terminating, while
+machines still running at the step limit average forty to a hundred. Since the predictor's
+whole purpose is to find programs that keep agreeing with an ongoing, possibly unbounded
+environment, discarding every program that has not yet halted discards almost every program
+capable of saying anything useful.
+
+The fix was to give the transition function an explicit \emph{emit} flag. When a transition
+fires with this flag set, the machine appends the symbol it just wrote (reduced modulo~2, so
+the emitted stream is binary regardless of the tape alphabet's size) to a separate,
+append-only output list, entirely distinct from the tape. This list is never revised: once a
+bit has been emitted, no later transition can alter it, which eliminates the prefix-violation
+problem by construction rather than by patching around it after the fact. It also means a
+program's status at the step budget -- halted or still running -- is now irrelevant to
+whether its output so far is usable: a non-halting machine has still emitted a perfectly
+valid, permanently fixed prefix, and is exactly as legitimate a hypothesis as one that has
+halted.
+
+This construction is a restricted instance of the standard equivalence between a
+single-tape and a multi-tape Turing machine: one ordinary read/write work tape, and one
+write-only, append-only output tape whose head only ever advances. The general
+multi-tape-to-single-tape reduction (interleaving each tape's cells on tracks of one
+physical tape) is more machinery than is needed here, precisely because the output tape's
+head never moves backward: its entire history can be represented as a simple growing list
+rather than requiring the two-way-infinite bookkeeping a genuine second work tape would
+need. The implementation reflects this directly -- \texttt{self.output} is a plain Python
+list, appended to and never otherwise modified.
 
 \subsection{The Universal Turing Machine}
 \label{sec:utm}
 
 A Universal Turing Machine (UTM) is a Turing machine capable of simulating any other
 Turing machine. It takes as input a binary encoding of some machine $M$ together with an
-input string $w$, and produces the same output that $M$ would produce on $w$. Crucially,
+input string $w$, and produces the same behaviour that $M$ would exhibit on $w$. Crucially,
 $M$ does not run as a separate process -- it exists entirely as data on the UTM's tape.
 The UTM reads $M$'s transition table one rule at a time, determines the applicable
 transition for the current simulated state and symbol, and applies it, updating a region
-of its own tape that represents $M$'s tape.
+of its own tape that represents $M$'s tape (and, per Section~\ref{sec:emission}, a separate
+list representing $M$'s output).
 
 For a UTM to simulate an arbitrary machine $M$, it must be possible to express $M$ as a
 finite binary string. The convention for doing so is called an \emph{encoding scheme}. The
 choice of encoding scheme is a design decision: any scheme that is unambiguous and
-complete is valid, since the Invariance Theorem\textsuperscript{*} guarantees that
-Kolmogorov complexity changes by at most an additive constant between any two reasonable
-schemes.
-
-\par\noindent{\footnotesize\textsuperscript{*}The Invariance Theorem is discussed in
-Section~\ref{sec:kolmogorov} on Kolmogorov complexity.}
+complete is valid, since the Invariance Theorem (Section~\ref{sec:invariance}) guarantees
+that Kolmogorov complexity changes by at most an additive constant between any two
+reasonable schemes.
 
 \subsection{Encoding Scheme}
 \label{sec:encoding}
@@ -127,9 +206,8 @@ binary string structured as follows.
 
 \paragraph{Header.} The string opens with two unary fields. The number of states $n$ is
 encoded as $n$ ones followed by a zero; the size of the tape alphabet $k$ is encoded the
-same way. For example, four states and three symbols give the prefix
-\texttt{1111\,0\,111\,0}. These fields are self-delimiting -- a decoder reads ones until
-it sees a zero, requiring no external length information.
+same way. These fields are self-delimiting -- a decoder reads ones until it sees a zero,
+requiring no external length information.
 
 \paragraph{Field widths.} Once $n$ and $k$ are known, all subsequent binary fields have
 fixed, computable widths:
@@ -138,14 +216,14 @@ fixed, computable widths:
   \texttt{symbol\_bits} &= \lceil \log_2 k \rceil && \text{(minimum bits to index any tape symbol)}.
 \end{align*}
 
-\paragraph{Special states.} The indices of $q_{\text{start}}$, $q_{\text{accept}}$, and
-$q_{\text{reject}}$ follow immediately, each encoded in \texttt{state\_bits} bits. No
-delimiters are needed because the width is known exactly.
+\paragraph{Special states.} The indices of $q_{\text{start}}$ and $q_{\text{halt}}$ follow
+immediately, each encoded in \texttt{state\_bits} bits. This is one field shorter than the
+7-tuple scheme, which required three special-state indices rather than two.
 
 \paragraph{Transition table.} The transition function $\delta$ is stored as a flat table
 of $n \times k$ entries in lexicographic order of (current state, current symbol) pairs.
 The input pair is implicit from the entry's position; only the output is stored. Each
-entry consists of three fields:
+entry consists of four fields:
 \begin{center}
 \begin{tabular}{ll}
   \toprule
@@ -154,81 +232,89 @@ entry consists of three fields:
   \texttt{new\_state}  & \texttt{state\_bits} bits \\
   \texttt{new\_symbol} & \texttt{symbol\_bits} bits \\
   \texttt{direction}   & 1 bit ($0 = $ Left, $1 = $ Right) \\
+  \texttt{emit}         & 1 bit ($0 = $ silent, $1 = $ append to output) \\
   \bottomrule
 \end{tabular}
 \end{center}
-Again, no delimiters are required. A decoder reads exactly
-$(\texttt{state\_bits} + \texttt{symbol\_bits} + 1)$ bits per entry and reconstructs each
-transition rule from the entry's position in the table.
+No delimiters are required. A decoder reads exactly
+$(\texttt{state\_bits} + \texttt{symbol\_bits} + 2)$ bits per entry and reconstructs each
+transition rule from the entry's position in the table. This is one bit longer per entry
+than the 7-tuple scheme, which had no emit flag.
 
 \paragraph{Blank symbol.} Finally, the index of the blank symbol is appended in
 \texttt{symbol\_bits} bits.
 
-The resulting string is fully self-delimiting: a decoder parses the unary header to
-determine all field widths, then reads a fixed number of bits at a time for every
-subsequent field. No delimiters appear anywhere in the binary portion of the encoding.
-This scheme was chosen for its compactness relative to a full unary encoding while
-remaining simple to implement and verify.
+The net effect of dropping one special-state field while adding one bit to every
+transition entry is, for small machines, a slightly \emph{longer} minimum encoding than
+the old scheme (25 bits for the smallest machine under this scheme, versus 22 bits under
+the old one). This is not the point of the change: the point, developed fully in
+Section~\ref{sec:sampling}, is that the smallest class becomes \emph{useful} rather than
+merely \emph{short} -- a distinction that matters far more once machines are weighted by
+both their prior probability and their capacity to say anything about an unfolding
+sequence.
 
 \subsection{Worked Example}
 \label{sec:encoding-example}
 
-Consider the following Turing machine, which accepts any binary string of even length and
-rejects any string of odd length:
+Consider the machine used as the canonical worked example throughout this project's test
+suite: a 3-state, 2-symbol machine that emits the alternating sequence
+$0,1,0,1,0,1,\ldots$ forever.
 \begin{center}
 \begin{tabular}{ll}
   \toprule
-  States    & $Q = \{0, 1, 2, 3\}$ \\
-  Alphabet  & $k = 3$ symbols (indices $0, 1, 2$ -- where $2$ is blank) \\
-  Blank     & index $2$ \\
-  Start     & state $1$ \\
-  Accept    & state $2$ \\
-  Reject    & state $3$ \\
+  States    & $Q = \{0, 1, 2\}$ \\
+  Alphabet  & $k = 2$ symbols \\
+  Blank     & index $0$ \\
+  Start     & state $0$ \\
+  Halt      & state $2$ (unreachable in normal operation) \\
   \bottomrule
 \end{tabular}
 \end{center}
-
-The machine works by alternating between two non-halting states ($0$ and $1$) on each
-input symbol, effectively counting parity. On reading a blank (end of input), state $1$
-accepts and state $0$ rejects.
+States $0$ and $1$ ping-pong forever, each writing a fixed symbol to the tape, emitting it,
+and handing control to the other, regardless of what is read:
+\[
+  \delta(0,\cdot) = (1,\,0,\,R,\,\text{emit}), \qquad
+  \delta(1,\cdot) = (0,\,1,\,R,\,\text{emit}).
+\]
+State $2$ is never reached in practice; its two transition-table rows are included only
+because the encoding requires an entry for every (state, symbol) pair, and are filled with
+an arbitrary silent self-loop.
 
 \paragraph{Computing field widths.}
 \begin{align*}
-  \texttt{state\_bits}  &= \lceil \log_2 4 \rceil = 2,\\
-  \texttt{symbol\_bits} &= \lceil \log_2 3 \rceil = 2.
+  \texttt{state\_bits}  &= \lceil \log_2 3 \rceil = 2,\\
+  \texttt{symbol\_bits} &= \lceil \log_2 2 \rceil = 1.
 \end{align*}
 
 \paragraph{Header.}
 \begin{center}
 \begin{tabular}{ll}
-  States (4)   & \texttt{1111 0} \\
-  Symbols (3)  & \texttt{111 0} \\
+  States (3)   & \texttt{111 0} \\
+  Symbols (2)  & \texttt{11 0} \\
 \end{tabular}
 \end{center}
 
 \paragraph{Special states.}
 \begin{center}
 \begin{tabular}{ll}
-  \texttt{start = 1}  & \texttt{01} \\
-  \texttt{accept = 2} & \texttt{10} \\
-  \texttt{reject = 3} & \texttt{11} \\
+  \texttt{start = 0}  & \texttt{00} \\
+  \texttt{halt = 2}   & \texttt{10} \\
 \end{tabular}
 \end{center}
 
-\paragraph{Transition table} (12 entries, one per (state, symbol) pair in order):
+\paragraph{Transition table} (6 entries, one per (state, symbol) pair in order):
 \begin{center}
 \begin{tabular}{lll}
   \toprule
-  Input pair & Output $(s', \sigma', d)$ & Encoding \\
+  Input pair & Output $(s', \sigma', d, e)$ & Encoding \\
   \midrule
-  (state 0, symbol 0) & $(1, 0, R)$ & \texttt{01 00 1} \\
-  (state 0, symbol 1) & $(1, 1, R)$ & \texttt{01 01 1} \\
-  (state 0, symbol 2) & $(3, 2, R)$ & \texttt{11 10 1} \\
-  (state 1, symbol 0) & $(0, 0, R)$ & \texttt{00 00 1} \\
-  (state 1, symbol 1) & $(0, 1, R)$ & \texttt{00 01 1} \\
-  (state 1, symbol 2) & $(2, 2, R)$ & \texttt{10 10 1} \\
-  (states 2, 3)       & \multicolumn{2}{l}{unreachable from non-halting computation;} \\
-                      & \multicolumn{2}{l}{filled with $(2, 2, R)$ as a safe default: \texttt{10 10 1}} \\
+  (state 0, symbol 0) & $(1, 0, R, \text{emit})$ & \texttt{01 0 1 1} \\
+  (state 0, symbol 1) & $(1, 0, R, \text{emit})$ & \texttt{01 0 1 1} \\
+  (state 1, symbol 0) & $(0, 1, R, \text{emit})$ & \texttt{00 1 1 1} \\
+  (state 1, symbol 1) & $(0, 1, R, \text{emit})$ & \texttt{00 1 1 1} \\
+  (state 2, symbol 0) & \multicolumn{2}{l}{unreachable halt-state row;} \\
+                       & \multicolumn{2}{l}{filled with $(2,0,R,\text{silent})$: \texttt{10 0 1 0}} \\
+  (state 2, symbol 1) & \multicolumn{2}{l}{same filler: \texttt{10 0 1 0}} \\
   \bottomrule
 \end{tabular}
 \end{center}
@@ -236,25 +322,349 @@ accepts and state $0$ rejects.
 \paragraph{Blank index.}
 \begin{center}
 \begin{tabular}{ll}
-  \texttt{blank = 2} & \texttt{10} \\
+  \texttt{blank = 0} & \texttt{0} \\
 \end{tabular}
 \end{center}
 
 \paragraph{Concatenated encoding.}
 \begin{verbatim}
-11110 1110 01 10 11
-01001 01011 11101 00001 00011 10101 10101 10101 10101 10101 10101 10101
-10
+1110 110 00 10
+01011 01011 00111 00111 10010 10010
+0
 \end{verbatim}
-
-Removing spaces gives the final binary string:
+Removing spaces gives the final 42-bit binary string:
 \begin{verbatim}
-11110111001101101001010111110100001000111010110101101011010110101101011010110
+111011000100101101011001110011110010100100
 \end{verbatim}
+This encoding, and the machine's behaviour, were verified directly: decoding it and
+running it for ten steps reproduces the transition table above and emits exactly
+\texttt{0101010101}, confirming both the encoder and decoder against each other and
+against the intended machine.
 
-This 77-bit string fully specifies the machine. A decoder reads the unary header to
-recover $n = 4$ and $k = 3$, computes $\texttt{state\_bits} = 2$ and
-$\texttt{symbol\_bits} = 2$, then reads 2 bits for each special state and 5 bits for each
-of the 12 transition entries, reconstructing the original 7-tuple exactly.
+\section{Kolmogorov Complexity}
+\label{sec:kolmogorov}
+
+\subsection{Definition and Incomputability}
+
+The (prefix) Kolmogorov complexity of a finite binary string $x$, relative to a fixed
+universal machine $U$, is the length of the shortest program that makes $U$ halt having
+emitted exactly $x$:
+\[
+  K(x) = \min\{\, |p| : U(p) \text{ halts with output } x \,\}.
+\]
+$K$ is not computable. If it were, one could construct a program that enumerates
+candidate strings and, for each, computes its complexity, halting on the first string
+whose complexity exceeds some threshold $n$. Such a program would itself have a fixed,
+short description -- of order $\log n$ bits -- yet by construction it outputs a string
+whose complexity is greater than $n$, a contradiction once $n$ exceeds the program's own
+length. The same fact can be seen directly from the halting problem: identifying the
+\emph{shortest} halting program for $x$ requires being able to rule out every shorter
+candidate, and ruling out a candidate that never halts is exactly the halting problem.
+
+Because $K$ cannot be computed, it can only be approximated from above: a shorter
+witnessing program, once found, immediately improves the estimate, but no finite search
+can ever certify that no shorter witness exists.
+
+\subsection{The Invariance Theorem}
+\label{sec:invariance}
+
+$K$ as defined above depends on the specific reference machine $U$. The Invariance
+Theorem states that for any two universal machines $U$ and $V$, there exists a constant
+$c_{UV}$, independent of $x$, such that
+\[
+  K_U(x) \le K_V(x) + c_{UV} \qquad \text{for all } x.
+\]
+The constant is the length of a program, run on $U$, that simulates $V$: any program of
+length $|p|$ that works on $V$ can be run on $U$ by prefixing it with this fixed
+simulator, at a fixed additive cost. Consequently, the specific choice of universal
+machine -- and hence the specific encoding scheme of Section~\ref{sec:encoding} -- only
+ever shifts complexity estimates by a constant that does not grow with the string being
+described. This is what licenses treating the particular encoding scheme built for this
+project as a legitimate stand-in for "a" universal machine, rather than requiring some
+canonical, privileged choice.
+
+\subsection{A Bounded, Computable Approximation}
+
+\texttt{bounded\_kolmogorov} implements a length- and time-bounded estimate of $K(x)$: it
+enumerates candidate programs in shortest-first order, decodes and runs each on the UTM
+for up to a fixed number of steps, and returns the length of the first one that halts
+having emitted exactly the target string. If no such program is found within the length
+budget, it returns one more than that budget, signalling that no witness was located
+rather than asserting the string's true complexity is that large.
+
+This routine deliberately enumerates \emph{exhaustively} rather than sampling, and
+requires halting rather than merely emitting a matching prefix. Both choices follow
+directly from what $K(x)$ means: identifying the single shortest program that produces a
+given string exactly is a different task from estimating a probability distribution over
+which programs are plausible, which is the task the predictor of
+Section~\ref{sec:predictor} performs instead. Requiring exact enumeration in shortest-first
+order guarantees that the first match found really is shortest; a sampled search could
+easily miss the true minimum. The cost of this guarantee is the same combinatorial
+explosion that motivated abandoning exhaustive enumeration in the predictor
+(Section~\ref{sec:sampling-fails}): \texttt{bounded\_kolmogorov} remains tractable only for
+short target strings and small length budgets, and this asymmetry between the two
+components -- one exhaustive, one sampled -- is a known, currently unresolved
+inconsistency between them, discussed further in Section~\ref{sec:retrospective}.
+
+\section{The Solomonoff Predictor}
+\label{sec:predictor}
+
+\subsection{Sequence Prediction and the Universal Prior}
+
+The task is to predict the next bit of an unknown, unbounded binary sequence -- the
+"environment" -- having observed some finite prefix $x$ of it so far, with no assumption
+about what computable process, if any, is generating that sequence.
+
+Formally, fix a universal prefix machine $U$ and imagine feeding it an infinite stream of
+fair coin flips as its program tape. Whatever $U$ outputs under this random input -- a
+finite string if $U$ halts, an unbounded one if it does not -- is a single random draw
+from the space of all binary sequences, $\{0,1\}^\infty$. This construction induces a
+probability measure $M$ on that space: for any finite string $x$, define the
+\emph{cylinder set} $\Gamma_x$ as the set of every infinite sequence beginning with $x$,
+and let
+\[
+  M(x) \;:=\; M(\Gamma_x) \;=\; \Pr\big(U\text{'s output, under random coin flips, starts with } x\big).
+\]
+Because $U$ is deterministic given its input tape, "starts with $x$" is determined
+entirely by which prefix of the coin-flip tape $U$ consumes before it has committed to
+$x$'s worth of output; different such prefixes are mutually exclusive events, and their
+probabilities add. Each candidate prefix $p$ occurs with probability $2^{-|p|}$ (the
+probability that $|p|$ fair coin flips come out exactly as $p$), giving the familiar
+closed form
+\[
+  M(x) = \sum_{p \,:\, U(p) \text{ starts with } x} 2^{-|p|}.
+\]
+The requirement that $U$'s halting programs be \emph{prefix-free} -- no halting program a
+prefix of another -- is what makes this sum well defined without double-counting: if $p$
+causes $U$ to halt having emitted a prefix of $x$, no proper extension of $p$ can also be
+counted, since $U$ never reads past $p$ once it has halted. The same prefix-free property
+is precisely Kraft's inequality, $\sum_p 2^{-|p|} \le 1$, restricted to halting programs;
+it is what guarantees $M$ is well-behaved as a probability object in the first place, not
+what by itself explains why prediction under $M$ converges (Section~\ref{sec:convergence}
+addresses that separately). Because some coin-flip tapes drive $U$ into an infinite loop
+without ever committing to $n$ full bits of output, $\sum_{x : |x|=n} M(x)$ can be
+strictly less than 1; $M$ is therefore a \emph{semimeasure} rather than a full probability
+measure, with the missing mass corresponding exactly to non-halting behaviour.
+
+\subsection{From Prior to Prediction}
+
+$M(x)$ is not itself a prediction -- it is the total prior probability mass consistent
+with everything observed so far. The predicted probability that the next bit is $1$,
+having observed $x$, follows from the ordinary definition of conditional probability,
+$P(A\mid B) = P(A\cap B)/P(B)$, applied with $A$ = "the sequence continues with a $1$" and
+$B$ = "the sequence starts with $x$":
+\[
+  P(\text{next} = 1 \mid x) \;=\; \frac{M(x1)}{M(x)},
+\]
+where $x1$ denotes $x$ with a $1$ appended. Concretely, $M(x)$ is the combined weight of
+every candidate program still consistent with the observations so far, and $M(x1)$ is the
+weight of the subset of those that additionally agree the next bit is $1$; their ratio is
+exactly what the implementation's \texttt{predict\_next} computes.
+
+\subsection{Why Prediction Converges}
+\label{sec:convergence}
+
+Suppose the environment is in fact generated by some computable process with a shortest
+generating program $p^\ast$ of length $K$. Because $p^\ast$ is, by definition, the process
+actually producing the observations, it never contradicts anything seen and is therefore
+never eliminated. Its prior weight, $2^{-K}$, is consequently a permanent lower bound on
+$M(x)$ for every $x$ the true environment ever produces.
+
+Every other program can be split into those that agree with $p^\ast$ about the next bit at
+a given step, and those that do not. A disagreeing program is, by definition, wrong about
+something that has not yet been observed; the next contradicting observation removes it
+from the pool permanently, and its weight is never recovered. Agreeing programs are never
+touched. The total weight belonging to disagreeing programs can therefore only shrink over
+time, while the weight belonging to $p^\ast$ and its agreeing companions never does. The
+fraction of total surviving weight that could still make an incorrect prediction is
+consequently non-increasing, and strictly decreases each time a disagreeing program is
+eliminated -- which is precisely the predictor's error, converging toward zero as
+observations accumulate. Solomonoff's convergence theorem quantifies the rate of this
+process directly in terms of $K$, the complexity of the true generating program: simpler
+environments are found, and hence predicted correctly, sooner.
+
+\subsection{Implementation}
+
+The implemented predictor approximates the infinite sum defining $M$ with a finite,
+sampled pool of candidate programs (Section~\ref{sec:sampling} describes how this pool is
+constructed). Each candidate is stored as a \texttt{\_CandidateProgram} holding its
+encoded string, a fixed prior weight, and its output as a list of bits, produced once
+during initialisation rather than recomputed on demand.
+
+\paragraph{Precomputing output.} A program's internal computation and the environment's
+observation stream operate on unrelated clocks: a program may need an arbitrary, a priori
+unknown number of internal steps to emit its next bit, while the environment supplies
+exactly one observation per interaction cycle. There is no meaningful way to interleave
+the two. Every candidate program is therefore run to completion (or to the step budget)
+once, up front, and its emitted output is stored as a fixed list; prediction and update
+thereafter only ever index into these precomputed lists, never re-simulate.
+
+\paragraph{Weight normalisation.} The raw prior weight of a program of length $\ell$ is
+$2^{-\ell}$; for $\ell$ in the hundreds, this underflows to exactly zero in ordinary
+floating-point arithmetic, silently deleting the program's influence. Every consumer of a
+weight in this implementation -- \texttt{predict\_next}, \texttt{get\_posterior} -- only
+ever computes a \emph{ratio} of weights, never a bare value in isolation. Multiplying every
+weight in the pool by the same constant therefore changes none of these ratios. The
+implementation exploits this by storing $2^{\,s-\ell}$ instead of $2^{-\ell}$, where $s$ is
+the shortest encoding length present in the sampled classes: the shortest program's weight
+becomes exactly $1.0$, and every other weight is a representable fraction of it, with no
+change to any prediction the system will ever output.
+
+\paragraph{Update and prediction.} On observing bit $b$ at position $n$, every surviving
+program whose recorded output at position $n$ disagrees with $b$, or whose output is too
+short to have an opinion at position $n$, is discarded, and the total surviving weight is
+recomputed as the sum over the remainder. Predicting the following bit sums the weight of
+survivors that are both \emph{live} (their output extends past the current position) and
+predict a $1$, divided by the total live weight -- programs that have run out of output
+are excluded from both numerator and denominator, since including them in the denominator
+alone would bias every prediction toward $0$.
+
+\section{Sampling the Hypothesis Space}
+\label{sec:sampling}
+
+\subsection{Why Exhaustive Enumeration Fails}
+\label{sec:sampling-fails}
+
+An earlier version of the enumerator constructed every machine that fit within a given
+length budget directly: every valid combination of alphabet size, blank symbol,
+special-state assignment, and transition table. Under the original 7-tuple model this
+enumeration was already dominated, by raw count, by the classes with the fewest states,
+of order $10^6$ machines within a 40-bit budget on the author's hardware -- and, as
+Section~\ref{sec:halt-merge} established, the single largest and cheapest such class was
+guaranteed to be computationally inert. Extending the length budget only worsens matters:
+the number of possible transition tables for an $(n,k)$-machine grows as
+$(4nk)^{nk}$, so even the modest step from a 40-bit to a 115-bit budget under the current
+scheme pushes several classes past $10^{30}$ machines, which cannot be enumerated,
+let alone simulated, in full.
+
+\subsection{Stratified Sampling by Class}
+
+All machines sharing the same state count $n$ and alphabet size $k$ -- a \emph{class} --
+have identical encoded length, and hence identical prior weight. This makes it possible to
+draw a program with exactly the correct prior probability without ever enumerating a
+class's contents: first choose a class with probability proportional to that class's
+\emph{total} prior mass, then choose uniformly among the (astronomically many) machines
+within it.
+
+Writing $\text{size}_c$ for the number of machines in class $c$ and $L_c$ for that class's
+shared encoding length, the class is chosen with probability
+$\text{size}_c \cdot 2^{-L_c} / \text{Total}$, and a machine within it with probability
+$1/\text{size}_c$. The probability that this two-stage process selects any particular
+machine $p$ in class $c$ is therefore
+\[
+  P(p) = \frac{\text{size}_c \cdot 2^{-L_c}}{\text{Total}} \times \frac{1}{\text{size}_c}
+       = \frac{2^{-L_c}}{\text{Total}},
+\]
+independent of $\text{size}_c$: it cancels exactly. Every individually drawn machine is
+therefore distributed according to the true Solomonoff prior, without the class's
+internal contents ever needing to be listed. Drawing $N$ independent samples this way
+visits large, low-probability classes rarely and small, high-probability classes often, in
+exactly the proportions the theory calls for, at a cost of one class selection and one
+uniform draw within it, per sample -- constant work per sample regardless of how large the
+underlying class is.
+
+\subsection{Exact Integer Mass Arithmetic}
+
+Class masses combine an astronomically large factor ($\text{size}_c$, which for the
+largest classes here exceeds $10^{30}$) with an astronomically small one
+($2^{-L_c}$, well below floating-point's smallest representable positive value for large
+$L_c$). Computing the product directly in floating point silently produces zero for the
+very classes whose size makes them numerically extreme in the first place. Since only
+class \emph{ratios} are ever needed (to select a class proportionally, and to choose among
+cumulative totals), the implementation instead computes every class's mass as an exact
+Python integer, $\text{size}_c \ll (L_{\max} - L_c)$ -- equivalent to
+$\text{size}_c \cdot 2^{L_{\max}-L_c}$, a common integer power-of-two rescaling across
+every class that cancels in any ratio, computed exactly via a bit shift rather than a
+floating-point multiplication. Class selection then uses \texttt{random.randrange} over
+the exact integer cumulative total, avoiding the float truncation that a library routine
+expecting floating-point weights would otherwise force.
+
+\subsection{Validating the Sampler}
+
+Because a sampler that is subtly biased produces results indistinguishable from a correct
+one until specifically checked, the enumerator exposes its own theoretical class-mass
+distribution (\texttt{length\_distribution}) and compares it against the lengths actually
+observed in a real batch of draws (\texttt{length\_report}). At two million samples with a
+115-bit length budget, seventeen distinct classes were reachable; Table~\ref{tab:sampling}
+reports a representative subset, comparing observed sampling frequency against the
+theoretical expectation computed independently from the class-mass formula.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Class $(n,k)$ & Encoded length (bits) & Observed frequency & Expected frequency \\
+\midrule
+$2\times2$ & 25  & 0.521390 & 0.521180 \\
+$4\times2$ & 53  & 0.195225 & 0.195442 \\
+$2\times4$ & 52  & 0.130020 & 0.130295 \\
+$4\times4$ & 112 & 0.048924 & 0.048861 \\
+$2\times3$ & 41  & 0.034929 & 0.034785 \\
+$3\times2$ & 42  & 0.034848 & 0.034785 \\
+$8\times2$ & 115 & 0.014273 & 0.014251 \\
+\bottomrule
+\end{tabular}
+\caption{Observed versus theoretical sampling frequency by class, 2{,}000{,}000 draws,
+$L_{\max}=115$. Every observed frequency lies within one standard deviation of its
+theoretical expectation, and no length outside the theoretically feasible set was ever
+produced.}
+\label{tab:sampling}
+\end{table}
+
+The three cheapest classes -- $2\times2$, $4\times2$, and $2\times4$ -- together account
+for $84.7\%$ of all prior mass at this length budget, a direct, measured illustration of
+how sharply the Solomonoff prior favours short descriptions.
+
+\section{Empirical Results}
+\label{sec:results}
+
+\subsection{Convergence on Structured Sequences}
+
+Fed the periodic sequence $0,1,0,1,0,1,\ldots$, the predictor's estimate of
+$P(\text{next}=1)$ evolved as $0.500 \to \sim\!0 \to 0.518 \to 0.769 \to 0.137 \to 1.000
+\to \sim\!0 \to 1.000$ over the first eight observations: an initial guess of pure
+uncertainty, a confident (and correct) guess of "more zeros" after the first zero is seen,
+a period of readjustment as the alternating pattern reveals itself, and a locked-on,
+correct prediction from the sixth observation onward. The corresponding survivor count
+falls from roughly one million candidate programs to a stable, non-collapsing few over the
+same span -- the signature the theory of Section~\ref{sec:convergence} predicts: mass
+concentrating on the (many, weight-equivalent, all period-2-consistent) surviving
+hypotheses rather than being exhausted entirely.
+
+\subsection{Failure on Sequences Requiring Counters}
+
+Not every computable sequence is found. A hand-constructed "doubling blocks" sequence
+(runs of $0$s and $1$s of length $1,1,2,2,4,4,8,8,\ldots$) drove the survivor count to
+exactly zero after roughly fifteen observations, at which point \texttt{predict\_next}
+falls back to an uninformative $0.5$. This is a distinct failure mode from a wrong but
+confident prediction: it indicates that no program in the two-million-sample pool
+generates this sequence, not that the predictor converged incorrectly. The reason is
+structural rather than a matter of sample size alone -- generating growing run-lengths
+requires a program that can count, which in turn requires enough working states and
+transitions to implement a counter, and the classes capable of this are precisely the
+ones the prior assigns the least mass to. This is an honest, expected limitation of an
+$l,t$-bounded approximation to Solomonoff induction: the theory guarantees convergence
+whenever the true generating program lies within the sampled hypothesis space, and offers
+no guarantee otherwise.
+
+\subsection{The Limits of a Deterministic Program Model}
+
+A genuinely stochastic source, such as a biased coin with $P(1)=0.7$, cannot be modelled
+by this implementation at all, for a structural reason rather than an insufficient sample
+budget: every candidate program runs on an empty input tape and produces one fixed,
+deterministic output string. There is no true generating \emph{program} for a stochastic
+source among deterministic candidates -- observing enough bits from a Bernoulli process
+eliminates every fixed-output hypothesis in turn, and the survivor pool collapses to
+nothing regardless of how it is sampled. The theoretically correct extension, present in
+Hutter's original formulation but not implemented here, equips the universal machine with
+a second, read-only random input tape that programs may consult during execution; $M$
+then becomes a probability-weighted sum over program \emph{behaviours} rather than a hard
+consistency filter over program \emph{outputs}, and a single program can legitimately
+represent a stochastic process by reading random bits and using them to bias its emitted
+output. Implementing this extension -- a second input tape, multiple simulation runs per
+candidate with different random seeds, and a corresponding change to how a program's
+weight contributes to $M(x)$ -- is identified here as concrete future work rather than
+attempted in the current implementation.
+
 
 \end{document}
