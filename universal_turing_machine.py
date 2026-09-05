@@ -15,11 +15,7 @@ class UniversalTuringMachine:
         start_state = int(encoding[:state_bits], 2)
         encoding = encoding[state_bits:]
 
-        accept_state = int(encoding[:state_bits], 2)
-        encoding = encoding[state_bits:]
-
-
-        reject_state = int(encoding[:state_bits], 2)
+        halt_state = int(encoding[:state_bits], 2)
         encoding = encoding[state_bits:]
 
         transition_function = list()
@@ -31,23 +27,18 @@ class UniversalTuringMachine:
             encoding = encoding[symbol_bits:]
             direction = int(encoding[:1], 2)
             encoding = encoding[1:]
+            emit = int(encoding[:1], 2)
+            encoding = encoding[1:]
 
-            transition_function.append((new_state, new_symbol, direction))
+            transition_function.append((new_state, new_symbol, direction, emit))
 
         blank_index = int(encoding[:symbol_bits], 2)
 
-        self.tm = TuringMachine(tuple(range(number_of_states)), alphabet_length, blank_index, transition_function, start_state, accept_state, reject_state)
+        self.tm = TuringMachine(tuple(range(number_of_states)), alphabet_length, blank_index, transition_function, start_state, halt_state)
 
-    def run_on_input(self, input_string: str, number_of_steps: int):
-
-        try:
-            self.tm.reset(input_string)
-        except ValueError:
-            raise ValueError("max steps must be a number")
-        
-        halt = self.tm.run(number_of_steps)
-        if halt is not None:
-            return halt
+    def run_on_input(self, input_string: str, number_of_steps: int) -> bool:
+        self.tm.reset(input_string)
+        return self.tm.run(number_of_steps)
 
 class Enumerator:
     def __init__(self):
@@ -66,26 +57,20 @@ class Enumerator:
         
 
 def main():
+    alternating = TuringMachine((0, 1, 2), 2, 0,
+                                ((1, 0, 1, 1), (1, 0, 1, 1),
+                                 (0, 1, 1, 1), (0, 1, 1, 1),
+                                 (2, 0, 1, 0), (2, 0, 1, 0)), 0, 2)
+    program = Encoder().encode(alternating)
+    print(f"program: {program} ({len(program)} bits)")
+
     utm = UniversalTuringMachine()
-    utm.decode("11110111001101101001010111110100001000111010110101101011010110101101011010110")
-
-    tm = utm.tm
-
-    print(utm.run_on_input("", 10000))
+    utm.decode(program)
+    halted = utm.run_on_input("", 20)
+    print(f"halted={halted} output={utm.tm.get_output_as_string()}")
 
     enumerator = Enumerator()
-    print(enumerator.generate_next())
-    print(enumerator.generate_next())
-    print(enumerator.generate_next())
-    print(enumerator.generate_next())
-    print(enumerator.generate_next())
-    print(enumerator.generate_next())
-    print(enumerator.generate_next())
-    print(enumerator.generate_next())
-    print(enumerator.generate_next())
-    
-    
-    #print(f"states: {tm.states}, \nalphabet: {tm.alphabet}, \n blank index: {tm.blank_index}, \ntransition: {tm.transition}, \nstart: {tm.start}, \naccept: {tm.accept}, \nreject: {tm.reject}")
+    print([enumerator.generate_next() for _ in range(9)])
 
 
 
