@@ -17,11 +17,8 @@ def bounded_kolmogorov(target_output: str, max_program_length: int, max_steps: i
         except (ValueError, IndexError):
             continue
 
-        if halted is None:
+        if not halted:
             continue
 
-        blank = str(utm.tm.blank_index)
-        output = utm.tm.get_tape_as_string().strip(blank)
-
-        if output == target_output:
+        if utm.tm.get_output_as_string() == target_output:
             return len(program)
