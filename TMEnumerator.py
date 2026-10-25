@@ -106,7 +106,7 @@ class TMEnumerator:
             classes_by_length.setdefault(self._encoding_length(n, k), []).append((n, k))
 
         lines = [f"{total} programs sampled, {len(counts)} distinct lengths",
-                 f"{'len':>5} {'(n,k)':>22} {'sampled':>9} {'observed':>10} {'expected':>10} {'cum':>9}"]
+                 f"{'len':>5} {'(n,k)':>22} {'sampled':>9} {'observed':>10} {'expected':>10} {'cumulative':>9}"]
         cumulative = 0.0
         for length in sorted(set(counts) | set(expected)):
             share = counts.get(length, 0) / total if total else 0.0
