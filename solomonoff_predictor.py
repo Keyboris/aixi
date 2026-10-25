@@ -1,6 +1,8 @@
 import multiprocessing
 import os
 import random
+import matplotlib.pyplot as plt
+import numpy as np
 
 from universal_turing_machine import UniversalTuringMachine
 from turing_machine import TuringMachine
@@ -36,15 +38,14 @@ def _worker_simulate(program_string: str):
 
 
 class _CandidateProgram:
-    __slots__ = ("string", "weight", "output")
+    __slots__ = ("string", "output")
 
-    def __init__(self, string: str, weight: float, output: list):
+    def __init__(self, string: str, output: list):
         self.string = string
-        self.weight = weight 
         self.output = output 
 
     def __repr__(self):
-        return f"_CandidateProgram({self.string!r}, w={self.weight:g})"
+        return f"_CandidateProgram({self.string!r}, o={self.output!r})"
 
 
 class SolomonoffPredictor:
@@ -71,7 +72,6 @@ class SolomonoffPredictor:
 
         self.observations = []
         self.candidate_programs = []
-        self.total_surviving_weight = 0.0
 
         program_strings = self._sample_program_strings()
 
@@ -82,9 +82,7 @@ class SolomonoffPredictor:
         for string, output in zip(program_strings, outputs):
             if not output:
                 continue
-            weight = self.enumerator.weight(len(string))
-            self.candidate_programs.append(_CandidateProgram(string, weight, output))
-            self.total_surviving_weight += weight
+            self.candidate_programs.append(_CandidateProgram(string, output))
 
         if verbose:
             print(f"{len(self.candidate_programs)} of {len(program_strings)} sampled programs "
@@ -130,44 +128,35 @@ class SolomonoffPredictor:
         index = len(self.observations)
         next_index = index + 1
         survivors = []
-        total = 0.0
         for program in self.candidate_programs:
             output = program.output
             if len(output) >= next_index and output[index] == observed_bit:
                 survivors.append(program)
-                total += program.weight
 
         self.candidate_programs = survivors
-        self.total_surviving_weight = total
         self.observations.append(observed_bit)
 
     def predict_next(self) -> float:
-        if self.total_surviving_weight <= 0.0:
+        if len(self.candidate_programs) == 0:
             return 0.5
 
         index = len(self.observations)
 
 
-        weight_for_1 = 0.0
-        live_weight = 0.0
+        num_programs_for_1 = 0
+        num_live_programs = 0
+
         for program in self.candidate_programs:
             if len(program.output) <= index:
                 continue
-            live_weight += program.weight
+            num_live_programs += 1
             if program.output[index] == 1:
-                weight_for_1 += program.weight
+                num_programs_for_1 += 1
 
-        if live_weight <= 0.0:
+        if num_live_programs == 0:
             return 0.5
 
-        return weight_for_1 / live_weight
-
-    def get_posterior(self) -> dict:
-        if self.total_surviving_weight <= 0.0:
-            return {}
-
-        return {program.string: program.weight / self.total_surviving_weight
-                for program in self.candidate_programs}
+        return num_programs_for_1 / num_live_programs
 
 
 class Bernoulli:
