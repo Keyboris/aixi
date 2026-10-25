@@ -10,9 +10,9 @@ class TuringMachine:
         self.start = start
         self.halt = halt
 
-    def step(self) -> bool:
+    def step(self) -> tuple[bool, bool]:
         if self.current_state == self.halt:
-            return True
+            return (True, False)
 
         transition_index = self.current_state * len(self.alphabet) + self.tape[self.head_pos]
         (next_state, symbol_to_write, direction, emit) = self.transition[transition_index]
@@ -27,19 +27,35 @@ class TuringMachine:
 
         if direction == 0:
             self.head_pos -= 1
-        else : self.head_pos += 1
+        else: 
+            self.head_pos += 1
+        
+        return (next_state == self.halt, bool(emit))
 
-        return next_state == self.halt
 
-
-    def run(self, max_steps) -> bool:
+    def run(self, max_steps, max_bits=None) -> bool:
         if max_steps is None:
             raise ValueError("max steps must be a number")
-        for _ in range(max_steps):
-            if self.step():
-                return True
-        return False
 
+        steps_left = max_steps
+        while True:
+            if max_bits is not None and len(self.output) >= max_bits:
+                self.status = "capped"
+                return False
+            if steps_left <= 0:
+                self.status = "stalled"
+                return False
+
+            halted, emitted = self.step()
+            steps_left -= 1
+
+            if halted:
+                self.status = "halted"
+                return True
+            if emitted and max_bits is not None:
+                steps_left = max_steps
+
+        
     def get_tape_as_string(self) -> str:
         return "".join(f"{val}" for pos, val in sorted(self.tape.items()))
 
@@ -57,7 +73,7 @@ class TuringMachine:
         self.head_pos = 0
         self.current_state = self.start
         self.output = []
-
+        self.status = None
 
 def main():
     #emits 0,1,0,1,... forever: two working states (0 and 1) ping pong, state 2 is the halt state

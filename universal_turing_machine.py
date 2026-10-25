@@ -36,9 +36,9 @@ class UniversalTuringMachine:
 
         self.tm = TuringMachine(tuple(range(number_of_states)), alphabet_length, blank_index, transition_function, start_state, halt_state)
 
-    def run_on_input(self, input_string: str, number_of_steps: int) -> bool:
+    def run_on_input(self, input_string: str, number_of_steps: int, max_bits: int = None) -> bool:
         self.tm.reset(input_string)
-        return self.tm.run(number_of_steps)
+        return self.tm.run(number_of_steps, max_bits)
 
 class Enumerator:
     def __init__(self):

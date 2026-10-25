@@ -73,8 +73,8 @@ float range.
 
 ## Results
 
-On the periodic sequence `0,1,0,1,...`, `P(next=1)` moves
-`0.500 -> ~0 -> 0.518 -> 0.769 -> 0.137 -> 1.000 -> ~0 -> 1.000` over eight
+On the repeating sequence `1,0,0,0,1,1,0,0,0,1,1,...`, `P(next=1)` moves
+`0.495, 0.076, 0.498, 0.753, 0.047, 0.996, 0.0, 0.998, 0.0, 1.0, 0.0, 1.0, ...` over eight
 observations, and stays locked on from there. The survivor pool falls from roughly a
 million candidates to a stable handful without collapsing to zero — mass concentrating on
 the many weight-equivalent period-2 hypotheses, which is what the convergence argument
